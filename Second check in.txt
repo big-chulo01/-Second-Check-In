@@ -1,0 +1,284 @@
+1. Enhanced Data Models (Library Project)
+// StudentAssignmentTracker.Lib/Models/Student.cs
+namespace StudentAssignmentTracker.Lib.Models
+{
+    public class Student
+    {
+        public int Id { get; set; }
+        public string Name { get; set; }
+        public string Email { get; set; }
+        public List<Assignment> Assignments { get; set; } = new();
+    }
+}
+
+// StudentAssignmentTracker.Lib/Models/Assignment.cs
+namespace StudentAssignmentTracker.Lib.Models
+{
+    public class Assignment
+    {
+        public int Id { get; set; }
+        public string Title { get; set; }
+        public string Description { get; set; }
+        public DateTime DueDate { get; set; }
+        public bool IsCompleted { get; set; }
+        public int StudentId { get; set; }
+    }
+}
+
+// StudentAssignmentTracker.Lib/Models/User.cs
+namespace StudentAssignmentTracker.Lib.Models
+{
+    public class User
+    {
+        public int Id { get; set; }
+        public string Username { get; set; }
+        public byte[] PasswordHash { get; set; }
+        public byte[] PasswordSalt { get; set; }
+    }
+}
+
+2. Authentication Service (Library Project)
+// StudentAssignmentTracker.Lib/Services/AuthService.cs
+using System.Security.Cryptography;
+using StudentAssignmentTracker.Lib.Models;
+
+namespace StudentAssignmentTracker.Lib.Services
+{
+    public class AuthService
+    {
+        public static void CreatePasswordHash(string password, out byte[] hash, out byte[] salt)
+        {
+            using var hmac = new HMACSHA512();
+            salt = hmac.Key;
+            hash = hmac.ComputeHash(System.Text.Encoding.UTF8.GetBytes(password));
+        }
+
+        public static bool VerifyPasswordHash(string password, byte[] hash, byte[] salt)
+        {
+            using var hmac = new HMACSHA512(salt);
+            var computedHash = hmac.ComputeHash(System.Text.Encoding.UTF8.GetBytes(password));
+            return computedHash.SequenceEqual(hash);
+        }
+    }
+}
+
+3. API Controllers with JWT Protection
+
+// StudentAssignmentTracker.API/Controllers/AuthController.cs
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.IdentityModel.Tokens;
+using StudentAssignmentTracker.Lib.Models;
+using StudentAssignmentTracker.Lib.Services;
+using System.IdentityModel.Tokens.Jwt;
+using System.Security.Claims;
+using System.Text;
+
+namespace StudentAssignmentTracker.API.Controllers
+{
+    [Route("api/[controller]")]
+    [ApiController]
+    public class AuthController : ControllerBase
+    {
+        private readonly IConfiguration _config;
+        private static List<User> _users = new();
+
+        public AuthController(IConfiguration config)
+        {
+            _config = config;
+        }
+
+        [HttpPost("register")]
+        public IActionResult Register(UserDto request)
+        {
+            AuthService.CreatePasswordHash(request.Password, out byte[] hash, out byte[] salt);
+            _users.Add(new User
+            {
+                Username = request.Username,
+                PasswordHash = hash,
+                PasswordSalt = salt
+            });
+            return Ok("User registered");
+        }
+
+        [HttpPost("login")]
+        public IActionResult Login(UserDto request)
+        {
+            var user = _users.FirstOrDefault(u => u.Username == request.Username);
+            if (user == null) return BadRequest("User not found");
+            if (!AuthService.VerifyPasswordHash(request.Password, user.PasswordHash, user.PasswordSalt))
+                return BadRequest("Wrong password");
+
+            var token = CreateToken(user);
+            return Ok(token);
+        }
+
+        private string CreateToken(User user)
+        {
+            var key = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(_config["Jwt:Key"]));
+            var creds = new SigningCredentials(key, SecurityAlgorithms.HmacSha512Signature);
+            var token = new JwtSecurityToken(
+                claims: new[] { new Claim(ClaimTypes.Name, user.Username) },
+                expires: DateTime.Now.AddDays(1),
+                signingCredentials: creds);
+            return new JwtSecurityTokenHandler().WriteToken(token);
+        }
+    }
+
+    public class UserDto
+    {
+        public string Username { get; set; }
+        public string Password { get; set; }
+    }
+}
+
+// StudentAssignmentTracker.API/Controllers/StudentsController.cs
+using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Mvc;
+using StudentAssignmentTracker.Lib.Models;
+
+namespace StudentAssignmentTracker.API.Controllers
+{
+    [Authorize]
+    [Route("api/[controller]")]
+    [ApiController]
+    public class StudentsController : ControllerBase
+    {
+        private static List<Student> _students = new();
+
+        [HttpGet]
+        public IActionResult GetAll()
+        {
+            return Ok(_students);
+        }
+
+        [HttpPost]
+        public IActionResult Add(Student student)
+        {
+            _students.Add(student);
+            return Ok(student);
+        }
+    }
+}
+
+4. Unit Tests (3 Tests Per Method)
+
+// StudentAssignmentTracker.Tests/AuthTests.cs
+using StudentAssignmentTracker.Lib.Models;
+using StudentAssignmentTracker.Lib.Services;
+using Xunit;
+
+namespace StudentAssignmentTracker.Tests
+{
+    public class AuthTests
+    {
+        [Fact]
+        public void CreatePasswordHash_GeneratesDifferentHashes()
+        {
+            AuthService.CreatePasswordHash("password1", out byte[] hash1, out byte[] salt1);
+            AuthService.CreatePasswordHash("password2", out byte[] hash2, out byte[] salt2);
+            Assert.NotEqual(hash1, hash2);
+        }
+
+        [Fact]
+        public void VerifyPasswordHash_ReturnsTrueForCorrectPassword()
+        {
+            AuthService.CreatePasswordHash("password", out byte[] hash, out byte[] salt);
+            Assert.True(AuthService.VerifyPasswordHash("password", hash, salt));
+        }
+
+        [Fact]
+        public void VerifyPasswordHash_ReturnsFalseForIncorrectPassword()
+        {
+            AuthService.CreatePasswordHash("password", out byte[] hash, out byte[] salt);
+            Assert.False(AuthService.VerifyPasswordHash("wrong", hash, salt));
+        }
+    }
+}
+
+// StudentAssignmentTracker.Tests/StudentTests.cs
+using StudentAssignmentTracker.Lib.Models;
+using Xunit;
+
+namespace StudentAssignmentTracker.Tests
+{
+    public class StudentTests
+    {
+        [Fact]
+        public void Student_InitializesWithEmptyAssignments()
+        {
+            var student = new Student();
+            Assert.Empty(student.Assignments);
+        }
+
+        [Fact]
+        public void Student_CanAddAssignment()
+        {
+            var student = new Student();
+            student.Assignments.Add(new Assignment());
+            Assert.Single(student.Assignments);
+        }
+
+        [Fact]
+        public void Student_PropertiesSetCorrectly()
+        {
+            var student = new Student { Id = 1, Name = "Test", Email = "test@test.com" };
+            Assert.Equal(1, student.Id);
+            Assert.Equal("Test", student.Name);
+            Assert.Equal("test@test.com", student.Email);
+        }
+    }
+}
+
+5. Configuration (appsettings.json)
+{
+  "Logging": {
+    "LogLevel": {
+      "Default": "Information",
+      "Microsoft.AspNetCore": "Warning"
+    }
+  },
+  "AllowedHosts": "*",
+  "Jwt": {
+    "Key": "YourSuperSecretKeyHereAtLeast32CharactersLong"
+  }
+}
+
+6. Program.cs Setup
+
+using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.IdentityModel.Tokens;
+using System.Text;
+
+var builder = WebApplication.CreateBuilder(args);
+
+// Add JWT authentication
+builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
+    .AddJwtBearer(options =>
+    {
+        options.TokenValidationParameters = new TokenValidationParameters
+        {
+            ValidateIssuerSigningKey = true,
+            IssuerSigningKey = new SymmetricSecurityKey(
+                Encoding.UTF8.GetBytes(builder.Configuration["Jwt:Key"])),
+            ValidateIssuer = false,
+            ValidateAudience = false
+        };
+    });
+
+builder.Services.AddControllers();
+var app = builder.Build();
+
+app.UseAuthentication();
+app.UseAuthorization();
+app.MapControllers();
+app.Run();
+
+//Needed folder
+StudentAssignmentTracker.Lib/Models/
+StudentAssignmentTracker.Lib/Services/
+StudentAssignmentTracker.API/Controllers/
+StudentAssignmentTracker.Tests/
+
+git add .
+git commit -m "Second check-in: Added auth, tests, and protected API"
+git push
